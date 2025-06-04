@@ -1,0 +1,7 @@
+*.mp3
+*.wav
+Audio/          # Ignores the 'Audio' folder and its contents
+Textures/       # Ignores the 'Textures' folder and its contents
+*.rc
+*.o             # Exclude compiled object files
+*.exe           # Exclude executables
