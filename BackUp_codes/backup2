@@ -1,0 +1,1609 @@
+#include <iostream>
+#include <limits>
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
+#include <ctime>
+#include <cstdlib>
+#include <vector>
+#include <chrono>
+#include <thread>
+#include <math.h>
+#include <utility>   
+#include <algorithm> 
+#include <fstream>   
+#include <string>    
+#include<sstream>
+#include <iomanip>
+
+using namespace std;
+
+// funcitons
+void gameLoop(string Player);
+void loadGame();
+void homePage();
+string name();
+class Options 
+{
+public:
+    bool soundOn = true;
+    bool isFullscreen = false;
+    float volume = 100.f;            // Initialize volume to a default value (0-100)
+    unsigned int difficulty = 1;     // 1 is easy 2 medium 3 hard
+    bool resetScores = false;        // Trigger flag
+    float controlSensitivity = 1.0f; // Initialize sensitivity (e.g., 0.5 to 2.0 range)
+};
+
+void showOptionMenu(Options &gameOption);
+// Global HighScores vector (can be managed differently in larger projects)
+vector<pair<string, int>> HighScores;
+
+// Flag to ensure high score processing happens only once per game over
+bool highScoreProcessed = false;
+
+// Function to load high scores from file
+void loadHighScores() // Renamed for clarity
+{
+    ifstream file("UserData/score.txt"); // Open the file for reading
+
+    if (!file.is_open()) // Check if the file opened successfully
+    {
+        cerr << "Failed to open user data file (UserData/score.txt) for reading.\n";
+        // If the file doesn't exist or can't be opened, HighScores will remain empty.
+        // We can add default scores later if needed.
+        return; // Exit the function if the file couldn't be opened
+    }
+
+    string line;
+    while (getline(file, line)) // Read the file line by line
+    {
+        size_t spacePos = line.find(' ');
+
+        // Check if a space was found and that there's text before and after it
+        if (spacePos != string::npos && spacePos > 0 && spacePos < line.length() - 1)
+        {
+            string username = line.substr(0, spacePos);
+            string scoreStr = line.substr(spacePos + 1);
+
+            try
+            {
+                int score = stoi(scoreStr);
+                HighScores.push_back({username, score});
+            }
+            catch (const std::invalid_argument &ia)
+            {
+                cerr << "Warning: Invalid score format in line: '" << line << "' - " << ia.what() << '\n';
+            }
+            catch (const std::out_of_range &oor)
+            {
+                cerr << "Warning: Score out of range in line: '" << line << "' - " << oor.what() << '\n';
+            }
+        }
+        else
+        {
+            cerr << "Warning: Skipping malformed line in score.txt: '" << line << "'\n";
+        }
+    }
+
+    file.close(); // Close the file
+
+    // Optional: Add default scores if the file was empty
+    // This ensures there's something to display if no scores have been saved yet.
+    // int numberOfDefaultScores = 5; // Example: Add 5 default entries
+    // while(HighScores.size() < numberOfDefaultScores) {
+    //      HighScores.push_back({"No Score", 0});
+    // }
+
+    // Sort the loaded scores (highest score first)
+    std::sort(HighScores.begin(), HighScores.end(), [](const pair<string, int> &a, const pair<string, int> &b)
+              {
+                  return a.second > b.second; // Sort by score descending
+              });
+
+    // Trim to the desired top N scores after loading
+    // int topN = 10; // Example: keep top 10
+    // if (HighScores.size() > topN) {
+    //     HighScores.resize(topN);
+    // }
+}
+
+// Function to save high scores to file
+void saveHighScores() // Renamed to match loading function
+{
+    // cout<<"Called saveHighScores\n"; // Debug message (optional)
+
+    // Open the file for writing. Clears existing content or creates new file.
+    ofstream file("UserData/score.txt");
+
+    // Check if the file opened successfully for writing
+    if (!file.is_open())
+    {
+        cerr << "Failed to open user data file (UserData/score.txt) for writing!\n";
+        return;
+    }
+
+    // Iterate through the HighScores vector and write each entry to the file
+    for (const auto &entry : HighScores)
+    {
+        // Write username, space, score, and a NEWLINE CHARACTER
+        file << entry.first << " " << entry.second << "\n";
+    }
+
+    file.close(); // Close the file
+}
+
+enum class GameState
+{
+    Playing,
+    GameOver
+};
+float Min(const float &a, const float &b)
+{
+    return (a < b) ? a : b;
+}
+
+float Max(const float &a, const float &b)
+{
+    return (a > b) ? a : b;
+}
+
+// These OBB functions are still used by drawOBBOutline for visualizing pipes,
+// and are useful for understanding rotated bounding boxes, even if not strictly
+// needed for the simplified Circle-AABB collision check.
+std::vector<sf::Vector2f> getTransformedPoints(const sf::Sprite &sprite)
+{
+    std::vector<sf::Vector2f> points(4);
+    sf::Transform transform = sprite.getTransform();
+    sf::FloatRect bounds = sprite.getLocalBounds(); // Get local bounds of the sprite
+
+    // Get the corners of the sprite's bounding box after transformation
+    points[0] = transform.transformPoint(0.f, 0.f);                    // top-left
+    points[1] = transform.transformPoint(bounds.width, 0.f);           // top-right
+    points[2] = transform.transformPoint(bounds.width, bounds.height); // bottom-right
+    points[3] = transform.transformPoint(0.f, bounds.height);          // bottom-left
+
+    return points;
+}
+
+std::vector<sf::Vector2f> getAxes(const std::vector<sf::Vector2f> &points)
+{
+    std::vector<sf::Vector2f> axes;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        // Loop through adjacent edges
+        sf::Vector2f edge = points[(i + 1) % 4] - points[i];
+        sf::Vector2f normal(-edge.y, edge.x); // Perpendicular
+        float length = std::sqrt(normal.x * normal.x + normal.y * normal.y);
+        if (length != 0)
+        {
+            normal /= length; // Normalize
+            axes.push_back(normal);
+        }
+    }
+
+    return axes;
+}
+
+void projectOntoAxis(const std::vector<sf::Vector2f> &points, const sf::Vector2f &axis, float &min, float &max)
+{
+    min = max = points[0].x * axis.x + points[0].y * axis.y;
+
+    for (int i = 1; i < 4; ++i)
+    {
+        float proj = points[i].x * axis.x + points[i].y * axis.y;
+        if (proj < min)
+            min = proj;
+        if (proj > max)
+            max = proj;
+    }
+}
+
+// Function to draw the OBB outline of a sprite
+void drawOBBOutline(sf::RenderWindow &window, const sf::Sprite &sprite, const sf::Color &color)
+{
+    std::vector<sf::Vector2f> points = getTransformedPoints(sprite);
+    sf::VertexArray lines(sf::LinesStrip, 5); // LinesStrip needs 5 points to close the rectangle (0-1, 1-2, 2-3, 3-0)
+
+    for (int i = 0; i < 4; ++i)
+    {
+        lines[i].position = points[i];
+        lines[i].color = color;
+    }
+    lines[4].position = points[0]; // Close the rectangle
+    lines[4].color = color;
+
+    window.draw(lines);
+}
+
+// Function to check for collision between a circle and an Axis-Aligned Bounding Box (AABB)
+bool checkCircleAABBIntersection(const sf::Vector2f &circleCenter, float circleRadius, const sf::FloatRect &aabb)
+{
+    // Find the closest point on the AABB to the circle's center
+    float closestX = std::max(aabb.left, std::min(circleCenter.x, aabb.left + aabb.width));
+    float closestY = std::max(aabb.top, std::min(circleCenter.y, aabb.top + aabb.height));
+
+    // Calculate the distance between the circle's center and this closest point
+    float distanceX = circleCenter.x - closestX;
+    float distanceY = circleCenter.y - closestY;
+    float distanceSquared = (distanceX * distanceX) + (distanceY * distanceY);
+
+    // If the distance squared is less than or equal to the radius squared, they collide
+    return distanceSquared <= (circleRadius * circleRadius);
+}
+
+GameState gameState = GameState::Playing;
+class Obstacle
+{
+public:
+    sf::Sprite sprite;
+
+    Obstacle(float width, float height, float x, float y, const sf::Texture &pipeTexture, bool flipY = false)
+    {
+        sprite.setTexture(pipeTexture);
+
+        // Apply scale and flip if needed
+        float scaleX = width / pipeTexture.getSize().x;
+        float scaleY = height / pipeTexture.getSize().y;
+        if (flipY)
+        {
+            sprite.setScale(scaleX, -scaleY);
+            sprite.setOrigin(0.f, pipeTexture.getSize().y); // flip from top
+        }
+        else
+        {
+            sprite.setScale(scaleX, scaleY);
+        }
+
+        sprite.setPosition(x, y);
+    }
+
+    void move(float dx)
+    {
+        sprite.move(dx, 0.f);
+    }
+
+    sf::FloatRect getBounds() const
+    {
+        return sprite.getGlobalBounds();
+    }
+
+    void draw(sf::RenderWindow &window)
+    {
+        window.draw(sprite);
+    }
+
+    sf::Vector2f getPosition() const
+    {
+        return sprite.getPosition();
+    }
+};
+
+class pipePair
+{
+public:
+    Obstacle top;
+    Obstacle bottom;
+    bool passed;
+
+    // Original constructor (kept for completeness, but might have logical issues with heights)
+    pipePair(const sf::Texture &topTexture, const sf::Texture &bottomTexture, float x, float gap)
+        : top(Obstacle(topTexture.getSize().x, 0.f, x, 0.f, topTexture)),          // Note: Heights are 0.f here
+          bottom(Obstacle(bottomTexture.getSize().x, 0.f, x, gap, bottomTexture)), // Note: Heights are 0.f here
+          passed(false)
+    {
+        // Positioning might be incorrect here given the 0.f heights
+        bottom.sprite.setPosition(x, gap + 200.f); // Adjust this value for proper spacing
+    }
+
+    // New constructor to accept pre-created Obstacle objects - fixes the compile error
+    pipePair(Obstacle topObstacle, Obstacle bottomObstacle)
+        : top(std::move(topObstacle)), bottom(std::move(bottomObstacle)), passed(false)
+    {
+        // The Obstacle objects are already created and positioned correctly before being passed here.
+        // We use std::move for efficient transfer of object resources.
+    }
+
+    void move(float dx)
+    {
+        top.move(dx);
+        bottom.move(dx);
+    }
+
+    void draw(sf::RenderWindow &window)
+    {
+        top.draw(window);
+        bottom.draw(window);
+    }
+
+    bool isPassed(const sf::Vector2f &birdPosition)
+    {
+        if (!passed && birdPosition.x > top.getPosition().x + top.getBounds().width)
+        {
+            passed = true;
+            return true;
+        }
+        return false;
+    }
+};
+
+std::vector<pipePair> pipes;
+float obstacleSpawnTimer = 0.f;
+float obstacleSpawnInterval = 2.f; // seconds
+const float baseSpeed = 200.f;
+// const float dist_between_pipes = 400.f; // This variable is not used in the provided code
+
+class Bird
+{
+public:
+    sf::Sprite sprite;          // The bird sprite for the texture
+    sf::Vector2f velocity;      // Velocity vector
+    int score = 0;              // Player score
+    sf::Texture birdTexture;    // Texture to hold the bird image
+    sf::CircleShape BirdCircle; // Added for circle collision
+
+    Bird(float width, float height)
+    {
+        // Load bird texture from file
+        if (!birdTexture.loadFromFile("Textures/bird.png"))
+        {
+            std::cerr << "Failed to load bird texture!" << std::endl;
+        }
+
+        // Set the texture to the sprite
+        sprite.setTexture(birdTexture);
+
+        // Scale the sprite to the required size
+        sprite.setScale(width / birdTexture.getSize().x, height / birdTexture.getSize().y);
+
+        // Set the origin for rotation to the center of the bird
+        sprite.setOrigin(birdTexture.getSize().x / 2.f, birdTexture.getSize().y / 2.f);
+
+        // Initial position of the bird
+        sprite.setPosition(400.f, 100.f);
+
+        // Initial velocity
+        velocity = sf::Vector2f(0.f, 0.f);
+
+        // Initialize BirdCircle (set radius later in main for easier tuning)
+        BirdCircle.setRadius(1.f); // Default small radius
+        BirdCircle.setFillColor(sf::Color::Transparent);
+        BirdCircle.setOutlineColor(sf::Color::Red);
+        BirdCircle.setOutlineThickness(1.f);
+    }
+
+    // Apply gravity to the bird
+    void applyGravity(float gravity, float dt)
+    {
+        velocity.y += gravity * dt;
+        sprite.move(0.f, velocity.y * dt);
+    }
+
+    // Make the bird jump with a force
+    void jump(float force)
+    {
+        velocity.y = -force;
+    }
+
+    // Set the bird's position manually
+    void setPosition(float x, float y)
+    {
+        sprite.setPosition(x, y);
+    }
+
+    // Get the bird's position
+    sf::Vector2f getPosition() const
+    {
+        return sprite.getPosition();
+    }
+
+    // Draw the bird sprite to the screen
+    void draw(sf::RenderWindow &window)
+    {
+        window.draw(sprite);
+    }
+
+    // Check if the bird collides with obstacles or goes out of bounds
+    bool isDead(float windowHeight) // Changed parameter name for clarity
+    {
+        // Check collision with top or bottom window boundaries
+        sf::FloatRect birdBounds = sprite.getGlobalBounds(); // Still use OBB for window bounds
+
+        if (birdBounds.top <= 0 || birdBounds.top + birdBounds.height >= windowHeight)
+            return true;
+
+        // Get bird circle properties once per check
+        sf::Vector2f circlePos = BirdCircle.getPosition();
+        float circleRadius = BirdCircle.getRadius();
+        sf::Vector2f circleCenter = circlePos + sf::Vector2f(circleRadius, circleRadius);
+
+        // Check collision with pipes using Circle vs AABB (since pipes don't rotate)
+        for (auto &pipe : pipes)
+        {
+            // Get AABBs of the pipe sprites using getGlobalBounds()
+            sf::FloatRect topPipeBounds = pipe.top.sprite.getGlobalBounds();
+            sf::FloatRect bottomPipeBounds = pipe.bottom.sprite.getGlobalBounds();
+
+            // Use checkCircleAABBIntersection
+            if (checkCircleAABBIntersection(circleCenter, circleRadius, topPipeBounds) ||
+                checkCircleAABBIntersection(circleCenter, circleRadius, bottomPipeBounds))
+            {
+                std::cout << "Bird Died due to collision\n";
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Update the rotation of the bird based on velocity
+    void updateRotation()
+    {
+        float maxAngle = 40.f;     // Max downward tilt
+        float minAngle = -25.f;    // Max upward tilt
+        float rotationSpeed = 5.f; // How quickly it tilts
+        float angle;
+
+        if (velocity.y < 0)
+        {
+            angle = minAngle; // Jumping
+        }
+        else
+        {
+            angle = std::min(maxAngle, velocity.y * 0.2f); // Falling, capped
+        }
+
+        sprite.setRotation(angle);
+    }
+
+    // Update the collision circle's position to match the sprite's center
+    void updateCirclePosition()
+    {
+        // The circle's position is its top-left corner, sprite.getPosition() is the center (due to origin)
+        BirdCircle.setPosition(sprite.getPosition().x - BirdCircle.getRadius(), sprite.getPosition().y - BirdCircle.getRadius());
+    }
+};
+
+int main()
+{
+    // Load high scores at the beginning of the game
+    loadHighScores();
+    homePage();
+    return 0;
+}
+
+void loadGame()
+{
+}
+
+void homePage() // Function now returns void
+{
+    sf::RenderWindow Homewindow(sf::VideoMode(800, 600), "Pipe Mania Menu", sf::Style::Default);
+    Homewindow.setVerticalSyncEnabled(true);
+    sf::SoundBuffer hoverBuffer;
+    sf::SoundBuffer clickBuffer;
+    if (!hoverBuffer.loadFromFile("Audio/button.wav"))
+    {
+        cerr << "Faild to lead hover sound!\n";
+    }
+    if (!clickBuffer.loadFromFile("Audio/click2.wav"))
+    {
+        cerr << "Faild to lead click sound!\n";
+    }
+    sf::Sound clickSound;
+    sf::Sound hoveSound;
+    clickSound.setBuffer(clickBuffer);
+    hoveSound.setBuffer(hoverBuffer);
+    // --- Background ---
+    sf::Texture backgroundTexture;
+    sf::Sprite backgroundSprite;
+
+    if (!backgroundTexture.loadFromFile("Textures/Home.png")) // Use your background image file
+    {
+        cerr << "Failed to load background texture!" << endl;
+        return; // Return from void function on error
+    }
+    backgroundSprite.setTexture(backgroundTexture);
+    // Scale background to fit window height
+    float scaleY = static_cast<float>(Homewindow.getSize().y) / backgroundTexture.getSize().y;
+    backgroundSprite.setScale(scaleY, scaleY);
+    backgroundSprite.setPosition(0.f, 0.f);
+
+    // --- Button Textures ---
+    sf::Texture startNormalTexture;
+    sf::Texture startHoverTexture;
+    sf::Texture optionsNormalTexture;
+    sf::Texture optionsHoverTexture;
+    sf::Texture leaderboardNormalTexture;
+    sf::Texture leaderboardHoverTexture;
+    sf::Texture exitNormalTexture;
+    sf::Texture exitHoverTexture;
+
+    // Load Start button textures (using your provided filenames)
+    if (!startNormalTexture.loadFromFile("Textures/startButton.PNG") ||
+        !startHoverTexture.loadFromFile("Textures/startButton_Hover.PNG"))
+    {
+        cerr << "Failed to load Start button textures!" << endl;
+        return; // Return from void function on error
+    }
+
+    // Load Options button textures (using your provided filenames)
+    if (!optionsNormalTexture.loadFromFile("Textures/optionsButton.PNG") || // Using your filename with typo
+        !optionsHoverTexture.loadFromFile("Textures/optionsButton_Hover.PNG"))
+    {
+        cerr << "Failed to load Options button textures!" << endl;
+        return; // Return from void function on error
+    }
+
+    // Load Leaderboard button textures (using your provided filenames)
+    if (!leaderboardNormalTexture.loadFromFile("Textures/LeaderBoardButton.PNG") ||
+        !leaderboardHoverTexture.loadFromFile("Textures/LeaderBoardButton_Hover.PNG"))
+    {
+        cerr << "Failed to load Leaderboard button textures!" << endl;
+        return; // Return from void function on error
+    }
+
+    // Load Exit button textures (using your provided filenames)
+    if (!exitNormalTexture.loadFromFile("Textures/exitButton.PNG") ||
+        !exitHoverTexture.loadFromFile("Textures/exitButton_Hover.PNG"))
+    {
+        cerr << "Failed to load Exit button textures!" << endl;
+        return; // Return from void function on error
+    }
+
+    // --- Button Sprites ---
+    sf::Sprite startButtonSprite(startNormalTexture);
+    sf::Sprite optionsButtonSprite(optionsNormalTexture);
+    sf::Sprite leaderboardButtonSprite(leaderboardNormalTexture);
+    sf::Sprite exitButtonSprite(exitNormalTexture);
+    float targetButtonWidth = Homewindow.getSize().x / 4.f; // Target width is 1/4 of window width
+
+    float originalButtonWidth = startNormalTexture.getSize().x;
+    float scaleFactor = targetButtonWidth / originalButtonWidth;
+    startButtonSprite.setScale(scaleFactor, scaleFactor);
+    optionsButtonSprite.setScale(scaleFactor, scaleFactor);
+    leaderboardButtonSprite.setScale(scaleFactor, scaleFactor);
+    exitButtonSprite.setScale(scaleFactor, scaleFactor);
+    float startX = Homewindow.getSize().x * 0.1f; // ADJUST THE 0.1f percentage
+    float startY = Homewindow.getSize().y * 0.4f; // ADJUST THE 0.4f percentage
+    startButtonSprite.setPosition(startX, startY);
+
+    // Define a base gap between buttons (in pixels, based on your original 800x600 design)
+    float baseGap = 20.f; // Adjust this value to control the base space between buttons
+    // Calculate the scaling factor for the gap based on window height
+    float heightScaleFactor = Homewindow.getSize().y / 600.f; // Still use this to scale the gap
+    // Calculate the scaled gap
+    float scaledGap = baseGap * heightScaleFactor; // Scale the gap with window height
+    // Position the next buttons based on the previous button's position and the scaled gap
+    float optionsY = startButtonSprite.getGlobalBounds().top + startButtonSprite.getGlobalBounds().height + scaledGap;
+    optionsButtonSprite.setPosition(startX, optionsY); // Use startX for horizontal alignment
+    float leaderboardY = optionsButtonSprite.getGlobalBounds().top + optionsButtonSprite.getGlobalBounds().height + scaledGap;
+    leaderboardButtonSprite.setPosition(startX, leaderboardY); // Use startX for horizontal alignment
+    float exitY = leaderboardButtonSprite.getGlobalBounds().top + leaderboardButtonSprite.getGlobalBounds().height + scaledGap;
+    exitButtonSprite.setPosition(startX, exitY); // Use startX for horizontal alignment
+    sf::Sprite *lastHoveredButton = nullptr;
+
+    bool exitMenu = false; // need it for delay after click to have sound effect
+    sf::Clock exitClock;
+    float exitDelay = 0.5f;             // 0.5 s delay
+    bool trackButton[4] = {0, 0, 0, 0}; // start,options,leaderboard,exit.
+    while (Homewindow.isOpen())
+    {
+        sf::Event event;
+        while (Homewindow.pollEvent(event))
+        {
+            if (event.type == sf::Event::Closed || (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Escape))
+            {
+                Homewindow.close(); // Close window if requested by OS
+            }
+
+            // --- Handle Keyboard Input ---
+            if (event.type == sf::Event::KeyPressed)
+            {
+                if (event.key.code == sf::Keyboard::Enter) // Example: Close window if Enter is pressed
+                {
+                    cout << "Enter key pressed!" << endl;
+                    exitMenu = true;     // signal to exit
+                    exitClock.restart(); // start the exit timer
+                }
+                // Add other key checks here if needed
+            }
+            if (event.type == sf::Event::Resized)
+            {
+                Homewindow.setView(sf::View(sf::FloatRect(0, 0, Homewindow.getSize().x, Homewindow.getSize().y)));
+                float targetButtonWidth = min(Homewindow.getSize().x / 4.f, 300.f); // Target width is 1/4 of window width
+
+                float originalButtonWidth = startNormalTexture.getSize().x;
+                scaleFactor = targetButtonWidth / originalButtonWidth;
+                startButtonSprite.setScale(scaleFactor, scaleFactor);
+                optionsButtonSprite.setScale(scaleFactor, scaleFactor);
+                leaderboardButtonSprite.setScale(scaleFactor, scaleFactor);
+                exitButtonSprite.setScale(scaleFactor, scaleFactor);
+                float startX = Homewindow.getSize().x * 0.1f; // ADJUST THE 0.1f percentage
+                float startY = Homewindow.getSize().y * 0.4f; // ADJUST THE 0.4f percentage
+                startButtonSprite.setPosition(startX, startY);
+
+                // Define a base gap between buttons (in pixels, based on your original 800x600 design)
+                float baseGap = 20.f; // Adjust this value to control the base space between buttons
+                // Calculate the scaling factor for the gap based on window height
+                float heightScaleFactor = Homewindow.getSize().y / 600.f; // Still use this to scale the gap
+                // Calculate the scaled gap
+                float scaledGap = baseGap * heightScaleFactor; // Scale the gap with window height
+                // Position the next buttons based on the previous button's position and the scaled gap
+                float optionsY = startButtonSprite.getGlobalBounds().top + startButtonSprite.getGlobalBounds().height + scaledGap;
+                optionsButtonSprite.setPosition(startX, optionsY); // Use startX for horizontal alignment
+                float leaderboardY = optionsButtonSprite.getGlobalBounds().top + optionsButtonSprite.getGlobalBounds().height + scaledGap;
+                leaderboardButtonSprite.setPosition(startX, leaderboardY); // Use startX for horizontal alignment
+                float exitY = leaderboardButtonSprite.getGlobalBounds().top + leaderboardButtonSprite.getGlobalBounds().height + scaledGap;
+                exitButtonSprite.setPosition(startX, exitY); // Use startX for horizontal alignment
+
+                float scaleY = static_cast<float>(Homewindow.getSize().y) / backgroundTexture.getSize().y;
+
+                backgroundSprite.setScale(scaleY, scaleY);
+                backgroundSprite.setPosition(0.f, 0.f);
+                Homewindow.draw(backgroundSprite);
+            }
+
+            // --- Handle Mouse Movement for Hover Effects ---
+            if (event.type == sf::Event::MouseMoved)
+            {
+                sf::Vector2f mousePos = Homewindow.mapPixelToCoords({event.mouseMove.x, event.mouseMove.y});
+
+                sf::Sprite *currentHoveredButton = nullptr; // guess no button is hovered
+                // Check hover for Start button
+                if (startButtonSprite.getGlobalBounds().contains(mousePos))
+                {
+                    currentHoveredButton = &startButtonSprite;
+                    startButtonSprite.setTexture(startHoverTexture);
+                    startButtonSprite.setScale(scaleFactor * 1.125, scaleFactor * 1.125);
+                }
+                else
+                {
+
+                    startButtonSprite.setTexture(startNormalTexture);
+                    startButtonSprite.setScale(scaleFactor, scaleFactor);
+                }
+
+                // Check hover for Options button
+                if (optionsButtonSprite.getGlobalBounds().contains(mousePos))
+                {
+
+                    currentHoveredButton = &optionsButtonSprite;
+                    optionsButtonSprite.setTexture(optionsHoverTexture);
+                    optionsButtonSprite.setScale(scaleFactor * 1.125, scaleFactor * 1.125);
+                }
+                else
+                {
+
+                    optionsButtonSprite.setTexture(optionsNormalTexture);
+                    optionsButtonSprite.setScale(scaleFactor, scaleFactor);
+                }
+
+                if (leaderboardButtonSprite.getGlobalBounds().contains(mousePos))
+                {
+
+                    currentHoveredButton = &leaderboardButtonSprite;
+                    leaderboardButtonSprite.setTexture(leaderboardHoverTexture);
+                    leaderboardButtonSprite.setScale(scaleFactor * 1.125, scaleFactor * 1.125);
+                }
+                else
+                {
+
+                    leaderboardButtonSprite.setTexture(leaderboardNormalTexture);
+                    leaderboardButtonSprite.setScale(scaleFactor, scaleFactor);
+                }
+
+                if (exitButtonSprite.getGlobalBounds().contains(mousePos))
+                {
+
+                    currentHoveredButton = &exitButtonSprite;
+                    exitButtonSprite.setTexture(exitHoverTexture);
+                    exitButtonSprite.setScale(scaleFactor * 1.125, scaleFactor * 1.125);
+                }
+                else
+                {
+                    exitButtonSprite.setTexture(exitNormalTexture);
+
+                    exitButtonSprite.setScale(scaleFactor, scaleFactor);
+                }
+                if (currentHoveredButton != lastHoveredButton)
+                {
+                    if (currentHoveredButton != nullptr)
+                    {
+                        hoveSound.play();
+                        lastHoveredButton = currentHoveredButton;
+                    }
+                }
+            }
+
+            // --- Handle Mouse Button Clicks ---
+            if (event.type == sf::Event::MouseButtonPressed)
+            {
+                if (event.mouseButton.button == sf::Mouse::Left)
+                {
+                    sf::Vector2f mousePos = Homewindow.mapPixelToCoords({event.mouseButton.x, event.mouseButton.y});
+
+                    if (startButtonSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        clickSound.play();
+                        cout << "clicked clilck\n";
+                        cout << "Start button clicked!" << endl;
+                        exitMenu = true; // signal to exit
+                        trackButton[0] = true;
+                        exitClock.restart(); // start the exit timer
+                    }
+
+                    if (optionsButtonSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        clickSound.play();
+                        cout << "Options button clicked!" << endl;
+                        exitMenu = true; // signal to exit
+                        trackButton[1] = true;
+                        exitClock.restart(); // start the exit timer
+                    }
+
+                    if (leaderboardButtonSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        clickSound.play();
+                        cout << "Leaderboard button clicked!" << endl;
+                        exitMenu = true; // signal to exit
+                        trackButton[2] = true;
+                        exitClock.restart(); // start the exit timer
+                    }
+
+                    if (exitButtonSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        clickSound.play();
+                        cout << "Exit button clicked!" << endl;
+                        exitMenu = true; // signal to exit
+                        trackButton[3] = true;
+                        exitClock.restart(); // start the exit timer
+                    }
+                }
+            }
+        }
+
+        if (exitMenu)
+        {
+            if (exitClock.getElapsedTime().asSeconds() >= exitDelay)
+            {
+                if (trackButton[0])
+                {
+                    gameLoop(name());
+                    return;
+                }
+                else if (trackButton[1])
+                {
+                    // option trigger
+                }
+                else if (trackButton[2])
+                {
+                    // leaderboard trigger
+                }
+                else if (trackButton[3])
+                {
+                    // exit trigger
+                }
+                else
+
+                    Homewindow.close();
+            }
+        }
+
+        // --- Drawing ---
+        Homewindow.clear();
+
+        Homewindow.draw(backgroundSprite);
+
+        Homewindow.draw(startButtonSprite);
+        Homewindow.draw(optionsButtonSprite);
+        Homewindow.draw(leaderboardButtonSprite);
+        Homewindow.draw(exitButtonSprite);
+
+        Homewindow.display();
+    }
+
+    return;
+}
+
+string name()
+{
+    sf::RenderWindow inputWindow(sf::VideoMode(400, 200), "Enter Your Name", sf::Style::Close); // Smaller window for input
+    inputWindow.setVerticalSyncEnabled(true);
+
+    sf::Font font;
+    // IMPORTANT: Replace "path/to/your/font.ttf" with a valid path to a font file
+    if (!font.loadFromFile("Text/arial.ttf"))
+    {
+        cerr << "Failed to load font for input!" << endl;
+        return ""; // Return empty string on font loading failure
+    }
+
+    // Text for the prompt
+    sf::Text promptText("Enter your name:", font, 20);
+    promptText.setFillColor(sf::Color::White);
+    promptText.setPosition(20.f, 40.f); // Adjust position as needed
+
+    // Text for displaying the user's input
+    sf::Text inputText("", font, 24);          // Start with empty string
+    inputText.setFillColor(sf::Color::Yellow); // Different color for input
+    inputText.setPosition(20.f, 80.f);         // Position below the prompt
+
+    std::string userName = ""; // String to store the actual input
+
+    // Optional: Limit the maximum length of the name
+    const size_t maxNameLength = 15; // For example, limit to 15 characters
+
+    // --- Main Loop for Input Window ---
+    while (inputWindow.isOpen())
+    {
+        sf::Event event;
+        while (inputWindow.pollEvent(event))
+        {
+            if (event.type == sf::Event::Closed)
+            {
+                inputWindow.close();
+            }
+
+            // --- Handle Text Input ---
+            if (event.type == sf::Event::TextEntered)
+            {
+                // Get the ASCII value of the entered character
+                unsigned int unicode = event.text.unicode;
+
+                // Handle backspace
+                if (unicode == '\b') // Backspace character
+                {
+                    if (!userName.empty())
+                    {
+                        userName.pop_back(); // Remove the last character
+                    }
+                }
+                // Handle Enter key (usually handled by KeyPressed, but good to consider here too)
+                // Note: TextEntered might give you newline characters on Enter depending on OS
+                else if (unicode == '\r' || unicode == '\n') // Carriage return or newline
+                {
+                    // Enter key pressed - break out of the loop or close the window
+                    inputWindow.close();
+                }
+                // Handle other printable characters
+                else if (unicode >= 32 && unicode < 127) // ASCII printable characters (space to ~)
+                {
+                    if (userName.size() < maxNameLength) // Check against max length
+                    {
+                        userName += static_cast<char>(unicode); // Append the character
+                    }
+                }
+
+                // Update the sf::Text object to display the current input string
+                inputText.setString(userName);
+            }
+
+            // --- Handle Key Presses (for Enter key more reliably) ---
+            if (event.type == sf::Event::KeyPressed)
+            {
+                if (event.key.code == sf::Keyboard::Enter)
+                {
+                    // Enter key pressed - close the window to signal completion
+                    inputWindow.close();
+                }
+            }
+        }
+
+        // --- Drawing ---
+        inputWindow.clear(sf::Color::Black); // Clear window with a background color
+
+        inputWindow.draw(promptText); // Draw the prompt
+        inputWindow.draw(inputText);  // Draw the user's input
+
+        inputWindow.display(); // Display the drawn elements
+    }
+
+    return userName; // Return the collected name when the window closes
+}
+
+void gameLoop(string Player)
+{
+    // Sound loading
+    sf::SoundBuffer jumpBuffer;
+    if (!jumpBuffer.loadFromFile("Audio/jump.wav"))
+        cerr << "Failed to load jump sound!\n";
+    sf::Sound jumpSound;
+    jumpSound.setBuffer(jumpBuffer);
+
+    sf::SoundBuffer gameoverBuffer;
+    if (!gameoverBuffer.loadFromFile("Audio/Gameover.wav")) // Corrected path based on common structure if needed
+        cerr << "Failed to load gameover sound!\n";
+    sf::Sound gameoverSound;
+    gameoverSound.setBuffer(gameoverBuffer);
+
+    sf::SoundBuffer collisionBuffer;
+    if (!collisionBuffer.loadFromFile("Audio/collision.wav"))
+        cerr << "Failed to load collision sound!\n";
+    sf::Sound collisionSound;
+    collisionSound.setBuffer(collisionBuffer);
+
+    // Font and score
+    sf::Font font;
+    if (!font.loadFromFile("Text/arial.ttf"))
+        cerr << "Failed to load font!\n";
+    sf::Text scoreText;
+    scoreText.setFont(font);
+    scoreText.setCharacterSize(30);
+    scoreText.setFillColor(sf::Color::White);
+    scoreText.setPosition(10.f, 10.f);
+
+    // Load pipe texture
+    sf::Texture pipeTexture;
+    if (!pipeTexture.loadFromFile("Textures/pipe.png"))
+        cerr << "Failed to load pipe texture!\n";
+
+    // Declare background texture and sprites
+    sf::Texture backgroundTexture;
+    sf::Sprite backgroundSprite1;
+    sf::Sprite backgroundSprite2;
+
+    srand(static_cast<unsigned>(time(0)));
+    sf::RenderWindow window(sf::VideoMode(1920, 1080), "Flappy Bird", sf::Style::Default);
+
+    // Load background texture and set up scrolling sprites
+    if (!backgroundTexture.loadFromFile("Textures/Background1.png"))
+    { // Use the filename you prefer
+        cerr << "Failed to load background texture!" << endl;
+        // Handle error or exit if background is critical
+        window.close(); // Close the window if background fails to load
+    }
+    else
+    {
+        backgroundSprite1.setTexture(backgroundTexture);
+        backgroundSprite2.setTexture(backgroundTexture);
+
+        // Scale background sprites to window height (maintain aspect ratio)
+        float scaleY = static_cast<float>(window.getSize().y) / backgroundTexture.getSize().y;
+        backgroundSprite1.setScale(scaleY, scaleY);
+        backgroundSprite2.setScale(scaleY, scaleY);
+
+        // Position background sprites side-by-side initially
+        backgroundSprite1.setPosition(0.f, 0.f);
+        backgroundSprite2.setPosition(backgroundSprite1.getGlobalBounds().width, 0.f);
+    }
+
+    Bird bird(70.f, 70.f);
+    bird.BirdCircle.setRadius(25.f); // Example radius, adjust based on visual fit to the bird's body
+
+    sf::Vector2u size = window.getSize();
+
+    float offsetX = 150.f;
+    float offsetY = size.y / 2.f;
+    bird.setPosition(offsetX, offsetY);
+    // Set initial position for the bird's collision circle
+    bird.updateCirclePosition();
+
+    sf::Clock clock;
+
+    while (window.isOpen())
+    {
+        float dt = clock.restart().asSeconds();
+        sf::Event event;
+
+        while (window.pollEvent(event))
+        {
+            if (event.type == sf::Event::Closed ||
+                (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Escape))
+                window.close();
+
+            else if (event.type == sf::Event::Resized)
+            {
+                float oldWidth = static_cast<float>(size.x);
+                float oldHeight = static_cast<float>(size.y);
+
+                size.x = event.size.width;
+                size.y = event.size.height;
+                window.setView(sf::View(sf::FloatRect(0, 0, size.x, size.y)));
+
+                sf::Vector2f pos = bird.getPosition();
+                pos.x *= static_cast<float>(size.x) / oldWidth;
+                pos.y *= static_cast<float>(size.y) / oldHeight;
+                bird.setPosition(pos.x, pos.y);
+                // Update circle position after window resize
+                bird.updateCirclePosition();
+
+                // Rescale background on window resize (maintain aspect ratio by height)
+                float scaleY = static_cast<float>(size.y) / backgroundTexture.getSize().y;
+                backgroundSprite1.setScale(scaleY, scaleY);
+                backgroundSprite2.setScale(scaleY, scaleY);
+
+                // Reposition backgrounds after resize
+                backgroundSprite1.setPosition(0.f, 0.f);
+                backgroundSprite2.setPosition(backgroundSprite1.getGlobalBounds().width, 0.f);
+            }
+
+            if (gameState == GameState::GameOver &&
+                event.type == sf::Event::KeyPressed &&
+                event.key.code == sf::Keyboard::R)
+            {
+                // Reset game state and elements on restart
+                bird.setPosition(offsetX, offsetY);
+                bird.velocity = sf::Vector2f(0.f, 0.f);
+                bird.score = 0;
+                pipes.clear();
+                obstacleSpawnTimer = 0.f;
+                bird.sprite.setRotation(0.f);
+                gameState = GameState::Playing;
+
+                // Update circle position on restart
+                bird.updateCirclePosition();
+
+                // Reset the high score processed flag for the new game
+                highScoreProcessed = false;
+
+                // Reset background positions on restart
+                backgroundSprite1.setPosition(0.f, 0.f);
+                backgroundSprite2.setPosition(backgroundSprite1.getGlobalBounds().width, 0.f);
+            }
+
+            if (event.type == sf::Event::KeyPressed &&
+                event.key.code == sf::Keyboard::Space &&
+                gameState == GameState::Playing)
+            {
+                bird.jump(250.f);
+                jumpSound.play();
+            }
+        }
+
+        if (gameState == GameState::Playing)
+        {
+            obstacleSpawnTimer += dt;
+            if (obstacleSpawnTimer >= obstacleSpawnInterval)
+            {
+                obstacleSpawnTimer = 0.f;
+                float gap = 150.f; // Fixed gap between pipes
+
+                // Total height available for pipes
+                float minPipeHeight = 50.f; // Minimum height of any pipe
+                float maxPipeHeight = size.y - gap - minPipeHeight;
+
+                // Random height for top pipe
+                float topPipeHeight = minPipeHeight + rand() % static_cast<int>(maxPipeHeight - minPipeHeight + 1);
+                float bottomPipeHeight = size.y - topPipeHeight - gap;
+
+                float PipeX = size.x + 1.f;
+
+                Obstacle topPipe(100.f, topPipeHeight, PipeX, 0.f, pipeTexture, true);                 // flipped top pipe
+                Obstacle bottomPipe(100.f, bottomPipeHeight, PipeX, topPipeHeight + gap, pipeTexture); // normal bottom pipe
+
+                pipes.emplace_back(topPipe, bottomPipe);
+            }
+
+            window.clear(sf::Color::Black); // Clear the window
+
+            // ** Update and draw scrolling background **
+            // The background speed should ideally be based on pipe speed for parallax
+            float speedMultiplier = 1.0f + bird.score / 400.f;
+            float backgroundSpeed = baseSpeed * speedMultiplier * 0.5f; // Example: background moves at half pipe speed
+
+            backgroundSprite1.move(-backgroundSpeed * dt, 0.f);
+            backgroundSprite2.move(-backgroundSpeed * dt, 0.f);
+
+            // Reposition backgrounds if they go off-screen to the left
+            // Reposition backgrounds if they go off-screen
+            if (backgroundSprite1.getGlobalBounds().left + backgroundSprite1.getGlobalBounds().width < 0)
+            {
+                backgroundSprite1.setPosition(backgroundSprite2.getGlobalBounds().left + backgroundSprite2.getGlobalBounds().width, 0.f);
+            }
+            if (backgroundSprite2.getGlobalBounds().left + backgroundSprite2.getGlobalBounds().width < 0)
+            {
+                backgroundSprite2.setPosition(backgroundSprite1.getGlobalBounds().left + backgroundSprite1.getGlobalBounds().width, 0.f);
+            }
+
+            window.draw(backgroundSprite1);
+            window.draw(backgroundSprite2);
+
+            // Cleanup off-screen pipes
+            while (!pipes.empty() &&
+                   pipes[0].top.getBounds().left + pipes[0].top.getBounds().width < 0)
+            {
+                pipes.erase(pipes.begin());
+            }
+
+            // Move & draw pipes
+            for (auto &pipePair : pipes)
+            {
+                float speedMultiplier = 1.0f + bird.score / 400.f;
+                float pipeSpeed = baseSpeed * speedMultiplier;
+
+                pipePair.top.move(-pipeSpeed * dt);
+                pipePair.bottom.move(-pipeSpeed * dt);
+
+                pipePair.top.draw(window);
+                pipePair.bottom.draw(window);
+
+                // ** Draw OBB outlines for pipes (Yellow) - still useful for visualization **
+                // drawOBBOutline(window, pipePair.top.sprite, sf::Color::Yellow); // Commented out for cleaner view by default
+                // drawOBBOutline(window, pipePair.bottom.sprite, sf::Color::Yellow); // Commented out by default
+            }
+
+            // Update bird's position and circle position
+            bird.applyGravity(980.f, dt);
+            bird.updateRotation();
+            bird.updateCirclePosition(); // Update circle position after sprite moves/rotates
+
+            if (bird.isDead(size.y)) // isDead now uses circle collision
+            {
+                collisionSound.play();
+                gameoverSound.play();
+                gameState = GameState::GameOver;
+            }
+
+            for (auto &pipe : pipes)
+            {
+                if (!pipe.passed &&
+                    bird.getPosition().x - bird.sprite.getGlobalBounds().width / 2 > pipe.top.getPosition().x + pipe.top.getBounds().width)
+                {
+                    pipe.passed = true;
+                    cout << "Score! :" << ++bird.score << endl;
+                }
+            }
+
+            scoreText.setString("Score: " + to_string(bird.score));
+            window.draw(scoreText);
+
+            // Draw bird
+            bird.draw(window);
+
+            // ** Draw collision circle for the bird (Red outline) **
+            // window.draw(bird.BirdCircle); // Commented out for cleaner view by default
+
+            window.display();
+        }
+        else if (gameState == GameState::GameOver)
+        {
+            // Process high score update only once per game over state
+            if (!highScoreProcessed)
+            {
+                // --- High Score Processing ---
+
+                // 1. Get the player's score
+                int currentScore = bird.score;
+                string playerName = "Player"; // Placeholder username for now (can get user input later)
+
+                // 2. Add the new score to the HighScores vector
+                HighScores.push_back({playerName, currentScore});
+
+                // 3. Sort the HighScores vector in descending order by score
+                std::sort(HighScores.begin(), HighScores.end(), [](const pair<string, int> &a, const pair<string, int> &b)
+                          {
+                              return a.second > b.second; // Sort by the 'second' element (score) descending
+                          });
+
+                // 4. Trim the HighScores vector to the desired top N size (e.g., top 10)
+                int topN = 10; // Define how many high scores to keep
+                if (HighScores.size() > topN)
+                {
+                    HighScores.resize(topN);
+                }
+
+                // 5. Save the updated HighScores vector to the file
+                saveHighScores(); // Call the corrected save function
+
+                // Set flag to indicate high score is processed for this game over
+                highScoreProcessed = true;
+
+                // --- End High Score Processing ---
+            }
+
+            // --- Drawing Game Over Screen ---
+            sf::Text gameOverText;
+            gameOverText.setFont(font);
+            gameOverText.setCharacterSize(50);
+            gameOverText.setFillColor(sf::Color::Red);
+
+            // You might want to display the actual High Scores list here in the future!
+            // For now, display the Game Over message and the player's score.
+
+            gameOverText.setString("Game Over!\nScore: " + to_string(bird.score) + "\nPress R to restart.");
+
+            // Check if the current score is in the top N after sorting and trimming (optional)
+            // This is how you'd determine if they got a new high score for display purposes.
+            bool isNewHighScore = false;
+            for (const auto &hs_entry : HighScores)
+            {
+                if (hs_entry.second == bird.score && hs_entry.first == "Player")
+                { // Simple check, might need refinement if names aren't unique
+                    isNewHighScore = true;
+                    break;
+                }
+            }
+
+            if (isNewHighScore && bird.score > 0) // Avoid congratulating for a score of 0 unless desired
+            {
+                // You might want to customize the message for a new high score!
+                // This requires knowing the rank or if it beat the previous #1.
+                // For simplicity, we'll just show the standard message for now.
+                // You could add text like "NEW HIGH SCORE!" here.
+            }
+
+            gameOverText.setPosition(size.x / 2.f - 200, size.y / 2.f - 100); // Adjust position if text content changes significantly
+            window.draw(gameOverText);
+            window.display();
+            // --- End Drawing Game Over Screen ---
+        }
+    }
+}
+
+
+// Function to display and handle the options menu
+void showOptionsMenu(Options &gameOptions) // Using the corrected class name
+{
+    sf::RenderWindow optionsWindow(sf::VideoMode(800, 600), "Options", sf::Style::Close);
+    optionsWindow.setVerticalSyncEnabled(true);
+
+    sf::Font font;
+    // IMPORTANT: Use a valid path to a .ttf font file relative to your executable
+    if (!font.loadFromFile("Text/arial.ttf"))
+    {
+        cerr << "Failed to load font for options menu!" << endl;
+        return; // Corrected: return from void function
+    }
+
+    // --- Audio ---
+    sf::SoundBuffer hoverBuffer;
+    sf::SoundBuffer clickBuffer;
+
+    // Corrected error messages and return statements
+    if (!hoverBuffer.loadFromFile("Audio/button.wav"))
+    {
+        cerr << "Failed to load hover sound!\n"; // Corrected message
+    }
+
+    if (!clickBuffer.loadFromFile("Audio/click2.wav"))
+    {
+        cerr << "Failed to load click sound!\n"; // Corrected message
+    }
+
+    sf::Sound clickSound;
+    sf::Sound hoverSound; // Corrected variable name
+    clickSound.setBuffer(clickBuffer);
+    hoverSound.setBuffer(hoverBuffer); // Corrected variable name
+
+    // --- Graphical Assets ---
+    sf::Texture sliderBarTexture;
+    sf::Texture sliderThumbTexture;
+    sf::Texture checkboxBaseTexture;
+    sf::Texture checkboxTickTexture;
+
+    // Load graphical control textures - Corrected return statements
+    if (!sliderBarTexture.loadFromFile("Textures/slider_bar.png"))
+    {
+        cerr << "Failed to load slider bar texture!" << endl;
+        return;
+    }
+    if (!sliderThumbTexture.loadFromFile("Textures/slider_thumb.png"))
+    {
+        cerr << "Failed to load slider thumb texture!" << endl;
+        return;
+    }
+    if (!checkboxBaseTexture.loadFromFile("Textures/checkbox_base.png"))
+    {
+        cerr << "Failed to load checkbox base texture!" << endl;
+        return;
+    }
+    if (!checkboxTickTexture.loadFromFile("Textures/checkbox_tick.png"))
+    {
+        cerr << "Failed to load checkbox tick texture!" << endl;
+        return;
+    }
+
+    // --- Option Labels (Text) ---
+    sf::Text soundLabel("Sound:", font, 25);
+    soundLabel.setFillColor(sf::Color::White);
+    soundLabel.setPosition(50.f, 50.f);
+
+    sf::Text fullscreenLabel("Fullscreen:", font, 25);
+    fullscreenLabel.setFillColor(sf::Color::White);
+    fullscreenLabel.setPosition(50.f, 100.f);
+
+    sf::Text volumeLabel("Volume:", font, 25);
+    volumeLabel.setFillColor(sf::Color::White);
+    volumeLabel.setPosition(50.f, 150.f);
+
+    sf::Text difficultyLabel("Difficulty:", font, 25);
+    difficultyLabel.setFillColor(sf::Color::White);
+    difficultyLabel.setPosition(50.f, 200.f);
+
+    sf::Text resetScoresLabel("Reset High Score:", font, 25);
+    resetScoresLabel.setFillColor(sf::Color::White);
+    resetScoresLabel.setPosition(50.f, 250.f);
+
+    sf::Text controlSensitivityLabel("Sensitivity:", font, 25);
+    controlSensitivityLabel.setFillColor(sf::Color::White);
+    controlSensitivityLabel.setPosition(50.f, 300.f);
+
+    // --- Graphical Controls (Sprites) ---
+
+    // Checkboxes
+    sf::Sprite soundCheckboxBase(checkboxBaseTexture);
+    sf::Sprite soundCheckboxTick(checkboxTickTexture);
+    sf::Sprite fullscreenCheckboxBase(checkboxBaseTexture);
+    sf::Sprite fullscreenCheckboxTick(checkboxTickTexture);
+
+    // Position checkboxes next to labels
+    soundCheckboxBase.setPosition(300.f, 50.f);
+    soundCheckboxTick.setPosition(300.f, 50.f);
+    fullscreenCheckboxBase.setPosition(300.f, 100.f);
+    fullscreenCheckboxTick.setPosition(300.f, 100.f);
+
+    // Sliders
+    sf::Sprite volumeBarSprite(sliderBarTexture);
+    sf::Sprite volumeThumbSprite(sliderThumbTexture);
+    sf::Sprite sensitivityBarSprite(sliderBarTexture);
+    sf::Sprite sensitivityThumbSprite(sliderThumbTexture);
+
+    // Position sliders next to labels - Using static_cast for clarity
+    volumeBarSprite.setPosition(300.f, 150.f + (volumeLabel.getGlobalBounds().height / 2.f) - (static_cast<float>(volumeBarSprite.getTexture()->getSize().y) / 2.f));
+    volumeThumbSprite.setPosition(volumeBarSprite.getPosition().x, volumeBarSprite.getPosition().y + (static_cast<float>(volumeBarSprite.getTexture()->getSize().y) / 2.f) - (static_cast<float>(volumeThumbSprite.getTexture()->getSize().y) / 2.f));
+
+    sensitivityBarSprite.setPosition(300.f, 300.f + (controlSensitivityLabel.getGlobalBounds().height / 2.f) - (static_cast<float>(sensitivityBarSprite.getTexture()->getSize().y) / 2.f));
+    sensitivityThumbSprite.setPosition(sensitivityBarSprite.getPosition().x, sensitivityBarSprite.getPosition().y + (static_cast<float>(sensitivityBarSprite.getTexture()->getSize().y) / 2.f) - (static_cast<float>(sensitivityThumbSprite.getTexture()->getSize().y) / 2.f));
+
+    // --- Difficulty Buttons (Simple Text Buttons) ---
+    sf::Text difficultyEasyText("Easy", font, 25);
+    sf::Text difficultyMediumText("Medium", font, 25);
+    sf::Text difficultyHardText("Hard", font, 25);
+
+    // Initial colors (will be updated based on gameOptions)
+    difficultyEasyText.setFillColor(sf::Color::White);
+    difficultyMediumText.setFillColor(sf::Color::White);
+    difficultyHardText.setFillColor(sf::Color::White);
+
+    difficultyEasyText.setPosition(300.f, 200.f);
+    difficultyMediumText.setPosition(380.f, 200.f);
+    difficultyHardText.setPosition(500.f, 200.f);
+
+    // --- Reset High Score Button (Simple Text Button) ---
+    sf::Text resetScoresButtonText("Reset", font, 25);
+    resetScoresButtonText.setFillColor(sf::Color::Red);
+    resetScoresButtonText.setPosition(300.f, 250.f);
+
+    // --- Back Button (Simple Text Button) ---
+    sf::Text backButton("Back", font, 30);
+    backButton.setFillColor(sf::Color::Yellow);
+    backButton.setPosition(50.f, 500.f);
+
+    // --- Text for displaying slider values ---
+    // Correctly declared here
+    sf::Text volumeValueText("", font, 25);
+    volumeValueText.setFillColor(sf::Color::Cyan);
+    // Position to the right of the volume bar (adjust spacing +10.f)
+    volumeValueText.setPosition(volumeBarSprite.getPosition().x + volumeBarSprite.getGlobalBounds().width + 10.f, 150.f);
+
+    sf::Text controlSensitivityValueText("", font, 25);
+    controlSensitivityValueText.setFillColor(sf::Color::Cyan);
+    // Position to the right of the sensitivity bar (adjust spacing +10.f)
+    controlSensitivityValueText.setPosition(sensitivityBarSprite.getPosition().x + sensitivityBarSprite.getGlobalBounds().width + 10.f, 300.f);
+
+    // --- State Variables for Sliders ---
+    bool isDraggingVolume = false;
+    bool isDraggingSensitivity = false;
+
+    // --- Initialize Slider Thumb Positions based on current Option Values ---
+    // This is important so the sliders reflect the current settings when the options menu opens.
+    // Volume (Map 0-100 to bar position)
+    float volumePercentage = gameOptions.volume / 100.f; // Get percentage (0 to 1)
+    float volumeBarLeft = volumeBarSprite.getGlobalBounds().left;
+    float volumeBarMovableRange = volumeBarSprite.getGlobalBounds().width - volumeThumbSprite.getGlobalBounds().width;
+    volumeThumbSprite.setPosition(volumeBarLeft + volumePercentage * volumeBarMovableRange, volumeThumbSprite.getPosition().y);
+
+    // Sensitivity (Map gameOptions.controlSensitivity range to bar position)
+    float minSensitivity = 0.5f;
+    float maxSensitivity = 2.0f;
+    float sensitivityPercentage = (gameOptions.controlSensitivity - minSensitivity) / (maxSensitivity - minSensitivity); // Get percentage (0 to 1)
+    float sensitivityBarLeft = sensitivityBarSprite.getGlobalBounds().left;
+    float sensitivityBarMovableRange = sensitivityBarSprite.getGlobalBounds().width - sensitivityThumbSprite.getGlobalBounds().width;
+    sensitivityThumbSprite.setPosition(sensitivityBarLeft + sensitivityPercentage * sensitivityBarMovableRange, sensitivityThumbSprite.getPosition().y);
+
+    // --- Main Loop for Options Window ---
+    while (optionsWindow.isOpen())
+    {
+        sf::Event event;
+        while (optionsWindow.pollEvent(event))
+        {
+            if (event.type == sf::Event::Closed)
+            {
+                optionsWindow.close();
+            }
+
+            // --- Handle Mouse Button Pressed ---
+            if (event.type == sf::Event::MouseButtonPressed)
+            {
+                if (event.mouseButton.button == sf::Mouse::Left)
+                {
+                    sf::Vector2f mousePos = optionsWindow.mapPixelToCoords(sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
+                    // Check for clicks on Checkboxes
+                    if (soundCheckboxBase.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.soundOn = !gameOptions.soundOn;
+                    }
+                    if (fullscreenCheckboxBase.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.isFullscreen = !gameOptions.isFullscreen; /* TODO: Implement actual fullscreen toggle */
+                    }
+
+                    // Check for clicks on Difficulty Buttons
+                    if (difficultyEasyText.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.difficulty = 1;
+                    }
+                    else if (difficultyMediumText.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.difficulty = 2;
+                    }
+                    else if (difficultyHardText.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.difficulty = 3;
+                    }
+
+                    // Check for click on Reset Scores Button
+                    if (resetScoresButtonText.getGlobalBounds().contains(mousePos))
+                    {
+                        gameOptions.resetScores = true;
+                        cout << "Reset High Score requested!" << endl;
+                    }
+
+                    // Check for click on Back button
+                    if (backButton.getGlobalBounds().contains(mousePos))
+                    {
+                        cout << "Back button clicked!" << endl;
+                        optionsWindow.close();
+                    }
+
+                    // Check for click on Slider Thumbs to start dragging
+                    if (volumeThumbSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        isDraggingVolume = true;
+                    }
+                    if (sensitivityThumbSprite.getGlobalBounds().contains(mousePos))
+                    {
+                        isDraggingSensitivity = true;
+                    }
+                }
+            }
+
+            // --- Handle Mouse Button Released ---
+            if (event.type == sf::Event::MouseButtonReleased)
+            {
+                if (event.mouseButton.button == sf::Mouse::Left)
+                {
+                    isDraggingVolume = false;      // Stop dragging volume thumb
+                    isDraggingSensitivity = false; // Stop dragging sensitivity thumb
+                }
+            }
+
+            // --- Handle Mouse Movement ---
+            if (event.type == sf::Event::MouseMoved)
+            {
+                sf::Vector2f mousePos = optionsWindow.mapPixelToCoords({static_cast<float>(event.mouseMove.x), static_cast<float>(event.mouseMove.y)}); // Use static_cast
+
+                // --- Volume Slider Dragging ---
+                if (isDraggingVolume)
+                {
+                    float newThumbX = mousePos.x - (volumeThumbSprite.getGlobalBounds().width / 2.f);
+
+                    float barLeft = volumeBarSprite.getGlobalBounds().left;
+                    float barRight = volumeBarSprite.getGlobalBounds().left + volumeBarSprite.getGlobalBounds().width;
+                    float thumbWidth = volumeThumbSprite.getGlobalBounds().width;
+
+                    if (newThumbX < barLeft)
+                        newThumbX = barLeft;
+                    else if (newThumbX + thumbWidth > barRight)
+                        newThumbX = barRight - thumbWidth;
+
+                    volumeThumbSprite.setPosition(newThumbX, volumeThumbSprite.getPosition().y);
+
+                    float thumbPositionAlongBar = volumeThumbSprite.getPosition().x - barLeft;
+                    float barMovableRange = volumeBarSprite.getGlobalBounds().width - volumeThumbSprite.getGlobalBounds().width;
+                    if (barMovableRange > 0)
+                    {
+                        float percentage = thumbPositionAlongBar / barMovableRange;
+                        gameOptions.volume = percentage * 100.f;
+                        // Ensure volume stays within 0-100 if mapping is slightly off due to float precision
+                        if (gameOptions.volume < 0)
+                            gameOptions.volume = 0;
+                        if (gameOptions.volume > 100)
+                            gameOptions.volume = 100;
+                    }
+                }
+
+                // --- Sensitivity Slider Dragging ---
+                if (isDraggingSensitivity)
+                {
+                    float newThumbX = mousePos.x - (sensitivityThumbSprite.getGlobalBounds().width / 2.f);
+
+                    float barLeft = sensitivityBarSprite.getGlobalBounds().left;
+                    float barRight = sensitivityBarSprite.getGlobalBounds().left + sensitivityBarSprite.getGlobalBounds().width;
+                    float thumbWidth = sensitivityThumbSprite.getGlobalBounds().width;
+
+                    if (newThumbX < barLeft)
+                        newThumbX = barLeft;
+                    else if (newThumbX + thumbWidth > barRight)
+                        newThumbX = barRight - thumbWidth;
+
+                    sensitivityThumbSprite.setPosition(newThumbX, sensitivityThumbSprite.getPosition().y);
+
+                    float thumbPositionAlongBar = sensitivityThumbSprite.getPosition().x - barLeft;
+                    float barMovableRange = sensitivityBarSprite.getGlobalBounds().width - sensitivityThumbSprite.getGlobalBounds().width;
+                    if (barMovableRange > 0)
+                    {
+                        float percentage = thumbPositionAlongBar / barMovableRange;
+                        float minSensitivity = 0.5f;
+                        float maxSensitivity = 2.0f;
+                        gameOptions.controlSensitivity = minSensitivity + percentage * (maxSensitivity - minSensitivity);
+                        // Ensure sensitivity stays within its range
+                        if (gameOptions.controlSensitivity < minSensitivity)
+                            gameOptions.controlSensitivity = minSensitivity;
+                        if (gameOptions.controlSensitivity > maxSensitivity)
+                            gameOptions.controlSensitivity = maxSensitivity;
+                    }
+                }
+
+                // --- Hover Effects (Optional) ---
+                // Add hover logic for labels or difficulty buttons here if desired
+            }
+        }
+
+        // --- Update Visual Indicators (Before Drawing) ---
+        // Checkbox tick visibility
+        soundCheckboxTick.setColor(gameOptions.soundOn ? sf::Color(255, 255, 255, 255) : sf::Color(255, 255, 255, 0));
+        fullscreenCheckboxTick.setColor(gameOptions.isFullscreen ? sf::Color(255, 255, 255, 255) : sf::Color(255, 255, 255, 0));
+
+        // Volume value text
+        volumeValueText.setString(to_string(static_cast<int>(round(gameOptions.volume))));
+
+        // Difficulty button colors (Highlight the selected difficulty)
+        difficultyEasyText.setFillColor(gameOptions.difficulty == 1 ? sf::Color::Green : sf::Color::White);
+        difficultyMediumText.setFillColor(gameOptions.difficulty == 2 ? sf::Color::Green : sf::Color::White);
+        difficultyHardText.setFillColor(gameOptions.difficulty == 3 ? sf::Color::Green : sf::Color::White);
+
+        // Sensitivity value text
+        stringstream ss;
+        ss << fixed << setprecision(2) << gameOptions.controlSensitivity;
+        controlSensitivityValueText.setString(ss.str());
+
+        // --- Drawing ---
+        optionsWindow.clear(sf::Color(30, 30, 30));
+
+        // Draw labels
+        optionsWindow.draw(soundLabel);
+        optionsWindow.draw(fullscreenLabel);
+        optionsWindow.draw(volumeLabel);
+        optionsWindow.draw(difficultyLabel);
+        optionsWindow.draw(resetScoresLabel);
+        optionsWindow.draw(controlSensitivityLabel);
+
+        // Draw graphical controls
+        optionsWindow.draw(soundCheckboxBase);
+        optionsWindow.draw(soundCheckboxTick);
+        optionsWindow.draw(fullscreenCheckboxBase);
+        optionsWindow.draw(fullscreenCheckboxTick);
+
+        optionsWindow.draw(volumeBarSprite);
+        optionsWindow.draw(volumeThumbSprite);
+        optionsWindow.draw(sensitivityBarSprite);
+        optionsWindow.draw(sensitivityThumbSprite);
+
+        // Draw difficulty buttons (text)
+        optionsWindow.draw(difficultyEasyText);
+        optionsWindow.draw(difficultyMediumText);
+        optionsWindow.draw(difficultyHardText);
+
+        // Draw Reset button (text)
+        optionsWindow.draw(resetScoresButtonText);
+
+        // Draw Back button (text)
+        optionsWindow.draw(backButton);
+
+        // Draw value texts for sliders
+        optionsWindow.draw(volumeValueText);
+        optionsWindow.draw(controlSensitivityValueText);
+
+        optionsWindow.display();
+    }
+}

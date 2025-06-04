@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Compile Icon Resource",
+      "type": "shell",
+      "command": "D:\\Compilers\\mingw64\\bin\\windres.exe",
+      "args": [
+        "resource.rc",
+        "resource.o"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
+    },
+    {
+      "label": "Build with SFML",
+      "type": "shell",
+      "command": "D:\\Compilers\\mingw64\\bin\\g++.exe",
+      "args": [
+        "-ID:\\Compilers\\SFML-2.6.2\\include",
+        "-LD:\\Compilers\\SFML-2.6.2\\lib",
+        "${workspaceFolder}\\Pipe_Menia.cpp",
+        "resource.o", // <- This line includes the icon!
+        "-o",
+        "${workspaceFolder}\\Game\\Pipe_Menia.exe",
+        "-lsfml-graphics",
+        "-lsfml-window",
+        "-lsfml-system",
+        "-lsfml-audio"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "powershell.exe"
+        }
+      },
+      "dependsOn": ["Compile Icon Resource"], // <- This runs the icon compile first!
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"],
+      "detail": "Build C++ using g++ and SFML with icon resource"
+    },
+    {
+      "label": "Run Executable",
+      "type": "shell",
+      "command": "${workspaceFolder}\\Pipe_Menia.exe",
+      "options": {
+        "shell": {
+          "executable": "powershell.exe"
+        }
+      },
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ]
+}
